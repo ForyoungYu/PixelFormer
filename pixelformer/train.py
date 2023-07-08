@@ -4,12 +4,14 @@ import torch.nn.utils as utils
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import wandb
 
 import os, sys, time
 from telnetlib import IP
 import argparse
 import numpy as np
 from tqdm import tqdm
+from datetime import datetime as dt
 
 from tensorboardX import SummaryWriter
 
@@ -22,9 +24,16 @@ parser = argparse.ArgumentParser(description='PixelFormer PyTorch implementation
 parser.convert_arg_line_to_args = convert_arg_line_to_args
 
 parser.add_argument('--mode',                      type=str,   help='train or test', default='train')
-parser.add_argument('--model_name',                type=str,   help='model name', default='pixelformer')
+# parser.add_argument('--model_name',                type=str,   help='model name', default='pixelformer')
 parser.add_argument('--encoder',                   type=str,   help='type of encoder, base07, large07', default='large07')
 parser.add_argument('--pretrain',                  type=str,   help='path of pretrained encoder', default=None)
+
+# Wandb
+parser.add_argument('--wandb',                                 help='allow wandb log' , action="store_true")
+parser.add_argument('--project_name',              type=str,   help='wandb project name', default='project')
+parser.add_argument('--name',                      type=str,   help='wandb run name', default='')
+parser.add_argument('--notes',                     type=str,   help='wandb notes', default='')
+parser.add_argument("--tags",                      type=str,   help="wandb tags", default='')
 
 # Dataset
 parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='nyu')
@@ -181,10 +190,28 @@ def main_worker(gpu, ngpus_per_node, args):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
 
+    if args.wandb:
+        run_id = f"{dt.now().strftime('%d-%h_%H-%M')}_bs{args.batch_size}-epo{args.num_epochs}-lr{args.learning_rate}-wd{args.weight_decay}"
+        name = f"{args.project_name}_{run_id}"
+        tags = args.tags.split(',') if args.tags != '' else None
+        wandb.init(config=args,
+                    project=args.project_name,
+                    entity=args.entity_name,
+                    tags=tags,
+                    notes=args.notes,
+                    name=name,
+                    dir=args.log_directory,
+                    job_type="training",
+                    reinit=True)
+
     model = PixelFormer(version=args.encoder, inv_depth=False, max_depth=args.max_depth, pretrained=args.pretrain)
+    if args.wandb:
+        wandb.watch(model) # 在界面中查看权值的梯度直方图
     model.train()
 
     num_params = sum([np.prod(p.size()) for p in model.parameters()])
+    # print(num_params)
+    # exit()
     print("== Total number of parameters: {}".format(num_params))
 
     num_params_update = sum([np.prod(p.shape) for p in model.parameters() if p.requires_grad])
@@ -200,7 +227,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model.cuda()
             model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
     else:
-        model = torch.nn.DataParallel(model)
+        # model = torch.nn.DataParallel(model)
         model.cuda()
 
     if args.distributed:
@@ -247,12 +274,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer = SummaryWriter(args.log_directory + '/' + args.model_name + '/summaries', flush_secs=30)
+        writer = SummaryWriter(args.log_directory + '/' + args.project_name + '/summaries', flush_secs=30)
         if args.do_online_eval:
             if args.eval_summary_directory != '':
-                eval_summary_path = os.path.join(args.eval_summary_directory, args.model_name)
+                eval_summary_path = os.path.join(args.eval_summary_directory, args.project_name)
             else:
-                eval_summary_path = os.path.join(args.log_directory, args.model_name, 'eval')
+                eval_summary_path = os.path.join(args.log_directory, args.project_name, 'eval')
             eval_summary_writer = SummaryWriter(eval_summary_path, flush_secs=30)
 
     silog_criterion = silog_loss(variance_focus=args.variance_focus)
@@ -315,7 +342,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 time_sofar = (time.time() - start_time) / 3600
                 training_time_left = (num_total_steps / global_step - 1.0) * time_sofar
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-                    print("{}".format(args.model_name))
+                    print("{}".format(args.project_name))
                 print_string = 'GPU: {} | examples/s: {:4.2f} | loss: {:.5f} | var sum: {:.3f} avg: {:.3f} | time elapsed: {:.2f}h | time left: {:.2f}h'
                 print(print_string.format(args.gpu, examples_per_sec, loss, var_sum.item(), var_sum.item()/var_cnt, time_sofar, training_time_left))
 
@@ -352,7 +379,7 @@ def main_worker(gpu, ngpus_per_node, args):
                         if is_best:
                             old_best_step = best_eval_steps[i]
                             old_best_name = '/model-{}-best_{}_{:.5f}'.format(old_best_step, eval_metrics[i], old_best)
-                            model_path = args.log_directory + '/' + args.model_name + old_best_name
+                            model_path = args.log_directory + '/' + args.project_name + old_best_name
                             if os.path.exists(model_path):
                                 command = 'rm {}'.format(model_path)
                                 os.system(command)
@@ -360,7 +387,7 @@ def main_worker(gpu, ngpus_per_node, args):
                             model_save_name = '/model-{}-best_{}_{:.5f}'.format(global_step, eval_metrics[i], measure)
                             print('New best for {}. Saving model: {}'.format(eval_metrics[i], model_save_name))
                             checkpoint = {'model': model.state_dict()}
-                            torch.save(checkpoint, args.log_directory + '/' + args.model_name + model_save_name)
+                            torch.save(checkpoint, args.log_directory + '/' + args.project_name + model_save_name)
                     eval_summary_writer.flush()
                 model.train()
                 block_print()
@@ -382,21 +409,22 @@ def main():
         print('train.py is only for training.')
         return -1
 
-    command = 'mkdir ' + os.path.join(args.log_directory, args.model_name)
+    command = 'mkdir -p ' + os.path.join(args.log_directory, args.project_name)
     os.system(command)
 
-    args_out_path = os.path.join(args.log_directory, args.model_name)
+    args_out_path = os.path.join(args.log_directory, args.project_name)
     command = 'cp ' + sys.argv[1] + ' ' + args_out_path
     os.system(command)
 
-    save_files = True
+    save_files = False
     if save_files:
-        aux_out_path = os.path.join(args.log_directory, args.model_name)
+        aux_out_path = os.path.join(args.log_directory, args.project_name)
         networks_savepath = os.path.join(aux_out_path, 'networks')
         dataloaders_savepath = os.path.join(aux_out_path, 'dataloaders')
         command = 'cp pixelformer/train.py ' + aux_out_path
         os.system(command)
-        command = 'mkdir -p ' + networks_savepath + ' && cp pixelformer/networks/*.py ' + networks_savepath
+        # command = 'mkdir -p ' + networks_savepath + ' && cp -r pixelformer/networks/ ' + networks_savepath
+        command = 'cp -r pixelformer/networks/ ' + aux_out_path
         os.system(command)
         command = 'mkdir -p ' + dataloaders_savepath + ' && cp pixelformer/dataloaders/*.py ' + dataloaders_savepath
         os.system(command)

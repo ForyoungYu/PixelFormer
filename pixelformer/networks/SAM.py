@@ -116,12 +116,12 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        q = self.q(x).view(B_, N, self.num_heads, -1).transpose(1, 2)
-        kv = self.kv(v).reshape(B_, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q = self.q(x).view(B_, N, self.num_heads, -1).transpose(1, 2) # B_, nH, N, C//nH
+        kv = self.kv(v).reshape(B_, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4) # 2, B_, nH, N, C//nH
         k, v = kv[0], kv[1]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        attn = (q @ k.transpose(-2, -1)) # B_, nH, N, N
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
@@ -192,7 +192,7 @@ class SAMBLOCK(nn.Module):
         mlp_hidden_dim = int(v_dim * mlp_ratio)
         self.mlp = Mlp(in_features=v_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, v, H, W):
+    def forward(self, x, v, H, W): # q, e, H, W
         """ Forward function.
 
         Args:
@@ -232,6 +232,7 @@ class SAMBLOCK(nn.Module):
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, self.v_dim)
         x = window_reverse(attn_windows, self.window_size, Hp, Wp)  # B H' W' C
 
+        # remove padding
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
 

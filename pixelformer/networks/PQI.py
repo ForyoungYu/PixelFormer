@@ -30,7 +30,7 @@ class PPM(nn.ModuleList):
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.act_cfg = act_cfg
-        for pool_scale in pool_scales:
+        for pool_scale in pool_scales: # == 1, 2, 3, 6
             # == if batch size = 1, BN is not supported, change to GN
             if pool_scale == 1: norm_cfg = dict(type='GN', requires_grad=True, num_groups=256)
             self.append(
@@ -352,13 +352,22 @@ class PSP(BaseDecodeHead):
         x = inputs[-1]
         psp_outs = [x]
         psp_outs.extend(self.psp_modules(x))
-        psp_outs = torch.cat(psp_outs, dim=1)
-        output = self.bottleneck(psp_outs)
-
+        # print(len(psp_outs))
+        # print(psp_outs[0].shape)
+        # print(psp_outs[1].shape)
+        # print(psp_outs[2].shape)
+        # print(psp_outs[3].shape)
+        # print(psp_outs[4].shape)
+        psp_outs = torch.cat(psp_outs, dim=1) # [1, 3584, 7, 7]
+        # print(len(psp_outs))
+        # print(psp_outs.shape)
+        output = self.bottleneck(psp_outs) # [1, 512, 7, 7]
+        # print("PSP OUT: " + str(output.shape))
+        
         return output
 
     def forward(self, inputs):
         """Forward function."""
-        inputs = self._transform_inputs(inputs)
+        inputs = self._transform_inputs(inputs) # 原样返回
         
-        return self.psp_forward(inputs)
+        return self.psp_forward(inputs) #? 没有搞懂
