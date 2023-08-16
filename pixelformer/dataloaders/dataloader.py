@@ -85,7 +85,8 @@ class DataLoadPreprocess(Dataset):
         if self.mode == 'train':
             if self.args.dataset == 'kitti':
                 rgb_file = sample_path.split()[0]
-                depth_file = os.path.join(sample_path.split()[0].split('/')[0], sample_path.split()[1])
+                # depth_file = os.path.join(sample_path.split()[0].split('/')[0], sample_path.split()[1])
+                depth_file = sample_path.split()[1]
                 if self.args.use_right is True and random.random() > 0.5:
                     rgb_file.replace('image_02', 'image_03')
                     depth_file.replace('image_02', 'image_03')
@@ -164,7 +165,8 @@ class DataLoadPreprocess(Dataset):
                 gt_path = self.args.gt_path_eval
                 depth_path = os.path.join(gt_path, "./" + sample_path.split()[1])
                 if self.args.dataset == 'kitti':
-                    depth_path = os.path.join(gt_path, sample_path.split()[0].split('/')[0], sample_path.split()[1])
+                    # depth_path = os.path.join(gt_path, sample_path.split()[0].split('/')[0], sample_path.split()[1])
+                    depth_path = os.path.join(gt_path, sample_path.split()[1])
                 has_valid_depth = False
                 try:
                     depth_gt = Image.open(depth_path)

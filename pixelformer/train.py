@@ -5,6 +5,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import wandb
+from wandb import AlertLevel
 
 import os, sys, time
 from telnetlib import IP
@@ -13,10 +14,8 @@ import numpy as np
 from tqdm import tqdm
 from datetime import datetime as dt
 
-from tensorboardX import SummaryWriter
-
 from utils import post_process_depth, flip_lr, silog_loss, compute_errors, eval_metrics, \
-                       block_print, enable_print, normalize_result, inv_normalize, convert_arg_line_to_args
+                       block_print, enable_print, normalize_result, inv_normalize, convert_arg_line_to_args, colorize
 from networks.PixelFormer import PixelFormer
 
 
@@ -42,6 +41,7 @@ parser.add_argument('--gt_path',                   type=str,   help='path to the
 parser.add_argument('--filenames_file',            type=str,   help='path to the filenames text file', required=True)
 parser.add_argument('--input_height',              type=int,   help='input height', default=480)
 parser.add_argument('--input_width',               type=int,   help='input width',  default=640)
+parser.add_argument('--min_depth',                 type=float, help='minimum depth in estimation', default=1e-3)
 parser.add_argument('--max_depth',                 type=float, help='maximum depth in estimation', default=10)
 
 # Log and save
@@ -101,6 +101,13 @@ if args.dataset == 'kitti' or args.dataset == 'nyu':
 elif args.dataset == 'kittipred':
     from dataloaders.dataloader_kittipred import NewDataLoader
 
+def log_images(img, depth, pred, args, step):
+    depth = colorize(depth, vmin=args.min_depth, vmax=args.max_depth)
+    pred = colorize(pred, vmin=args.min_depth, vmax=args.max_depth)
+    wandb.log({"image": wandb.Image(img),
+            "depth_gt": wandb.Image(depth),
+            "depth_est": wandb.Image(pred)
+            }, step=step)
 
 def online_eval(model, dataloader_eval, gpu, ngpus, post_process=False):
     eval_measures = torch.zeros(10).cuda(device=gpu)
@@ -196,13 +203,10 @@ def main_worker(gpu, ngpus_per_node, args):
         tags = args.tags.split(',') if args.tags != '' else None
         wandb.init(config=args,
                     project=args.project_name,
-                    entity=args.entity_name,
                     tags=tags,
                     notes=args.notes,
                     name=name,
-                    dir=args.log_directory,
-                    job_type="training",
-                    reinit=True)
+                    dir=args.log_directory)
 
     model = PixelFormer(version=args.encoder, inv_depth=False, max_depth=args.max_depth, pretrained=args.pretrain)
     if args.wandb:
@@ -210,8 +214,6 @@ def main_worker(gpu, ngpus_per_node, args):
     model.train()
 
     num_params = sum([np.prod(p.size()) for p in model.parameters()])
-    # print(num_params)
-    # exit()
     print("== Total number of parameters: {}".format(num_params))
 
     num_params_update = sum([np.prod(p.shape) for p in model.parameters() if p.requires_grad])
@@ -227,7 +229,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model.cuda()
             model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
     else:
-        # model = torch.nn.DataParallel(model)
+        model = torch.nn.DataParallel(model)
         model.cuda()
 
     if args.distributed:
@@ -254,9 +256,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 loc = 'cuda:{}'.format(args.gpu)
                 checkpoint = torch.load(args.checkpoint_path, map_location=loc)
             model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            # optimizer.load_state_dict(checkpoint['optimizer'])
 
-            print("== Loaded checkpoint '{}' (global_step {})".format(args.checkpoint_path, checkpoint['global_step']))
+            # print("== Loaded checkpoint '{}' (global_step {})".format(args.checkpoint_path, checkpoint['global_step']))
         else:
             print("== No checkpoint found at '{}'".format(args.checkpoint_path))
         model_just_loaded = True
@@ -271,16 +273,6 @@ def main_worker(gpu, ngpus_per_node, args):
     # model.eval()
     # with torch.no_grad():
     #     eval_measures = online_eval(model, dataloader_eval, gpu, ngpus_per_node, post_process=True)
-
-    # Logging
-    if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer = SummaryWriter(args.log_directory + '/' + args.project_name + '/summaries', flush_secs=30)
-        if args.do_online_eval:
-            if args.eval_summary_directory != '':
-                eval_summary_path = os.path.join(args.eval_summary_directory, args.project_name)
-            else:
-                eval_summary_path = os.path.join(args.log_directory, args.project_name, 'eval')
-            eval_summary_writer = SummaryWriter(eval_summary_path, flush_secs=30)
 
     silog_criterion = silog_loss(variance_focus=args.variance_focus)
 
@@ -301,6 +293,8 @@ def main_worker(gpu, ngpus_per_node, args):
     epoch = global_step // steps_per_epoch
 
     while epoch < args.num_epochs:
+        if args.wandb:
+            wandb.log({'epoch': epoch}, step=global_step)
         if args.distributed:
             dataloader.train_sampler.set_epoch(epoch)
 
@@ -346,17 +340,26 @@ def main_worker(gpu, ngpus_per_node, args):
                 print_string = 'GPU: {} | examples/s: {:4.2f} | loss: {:.5f} | var sum: {:.3f} avg: {:.3f} | time elapsed: {:.2f}h | time left: {:.2f}h'
                 print(print_string.format(args.gpu, examples_per_sec, loss, var_sum.item(), var_sum.item()/var_cnt, time_sofar, training_time_left))
 
-                if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                                                            and args.rank % ngpus_per_node == 0):
-                    writer.add_scalar('silog_loss', loss, global_step)
-                    writer.add_scalar('learning_rate', current_lr, global_step)
-                    writer.add_scalar('var average', var_sum.item()/var_cnt, global_step)
-                    depth_gt = torch.where(depth_gt < 1e-3, depth_gt * 0 + 1e3, depth_gt)
-                    for i in range(num_log_images):
-                        writer.add_image('depth_gt/image/{}'.format(i), normalize_result(1/depth_gt[i, :, :, :].data), global_step)
-                        writer.add_image('depth_est/image/{}'.format(i), normalize_result(1/depth_est[i, :, :, :].data), global_step)
-                        writer.add_image('image/image/{}'.format(i), inv_normalize(image[i, :, :, :]).data, global_step)
-                    writer.flush()
+                depth_gt = torch.where(depth_gt < args.min_depth, depth_gt * 0 + args.min_depth, depth_gt)
+                if args.wandb:
+                    wandb.log({'silog_loss': loss}, step=global_step)
+                    wandb.log({'learning_rate': current_lr}, step=global_step)
+                    wandb.log({'var average': var_sum.item()/var_cnt}, step=global_step)
+                    try:
+                        for i in range(num_log_images):
+                            log_images(inv_normalize(image[i, :, :, :]).data,
+                                    depth_gt[i, :, :, :].data,
+                                    depth_est[i, :, :, :].data,
+                                    args,
+                                    global_step)
+                    except Exception as e:
+                        print("Exception in logging: ", e)
+                        wandb.alert(
+                            title="Logging Images Error",
+                            text=f"Exception in logging: {e}",
+                            level=AlertLevel.ERROR,
+                            wait_duration=10,
+                        )
 
             if args.do_online_eval and global_step and global_step % args.eval_freq == 0 and not model_just_loaded:
                 time.sleep(0.1)
@@ -364,8 +367,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 with torch.no_grad():
                     eval_measures = online_eval(model, dataloader_eval, gpu, ngpus_per_node, post_process=True)
                 if eval_measures is not None:
+                    if args.wandb:
+                        wandb.log({f"Metrics/{k}": v for k, v in zip(eval_metrics, eval_measures)}, step=global_step)
                     for i in range(9):
-                        eval_summary_writer.add_scalar(eval_metrics[i], eval_measures[i].cpu(), int(global_step))
                         measure = eval_measures[i]
                         is_best = False
                         if i < 6 and measure < best_eval_measures_lower_better[i]:
@@ -378,17 +382,16 @@ def main_worker(gpu, ngpus_per_node, args):
                             is_best = True
                         if is_best:
                             old_best_step = best_eval_steps[i]
-                            old_best_name = '/model-{}-best_{}_{:.5f}'.format(old_best_step, eval_metrics[i], old_best)
+                            old_best_name = '/model-{}-best_{}_{:.5f}.ckpt'.format(old_best_step, eval_metrics[i], old_best)
                             model_path = args.log_directory + '/' + args.project_name + old_best_name
                             if os.path.exists(model_path):
                                 command = 'rm {}'.format(model_path)
                                 os.system(command)
                             best_eval_steps[i] = global_step
-                            model_save_name = '/model-{}-best_{}_{:.5f}'.format(global_step, eval_metrics[i], measure)
+                            model_save_name = '/model-{}-best_{}_{:.5f}.ckpt'.format(global_step, eval_metrics[i], measure)
                             print('New best for {}. Saving model: {}'.format(eval_metrics[i], model_save_name))
                             checkpoint = {'model': model.state_dict()}
                             torch.save(checkpoint, args.log_directory + '/' + args.project_name + model_save_name)
-                    eval_summary_writer.flush()
                 model.train()
                 block_print()
                 enable_print()
@@ -397,12 +400,6 @@ def main_worker(gpu, ngpus_per_node, args):
             global_step += 1
 
         epoch += 1
-       
-    if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer.close()
-        if args.do_online_eval:
-            eval_summary_writer.close()
-
 
 def main():
     if args.mode != 'train':
@@ -412,9 +409,9 @@ def main():
     command = 'mkdir -p ' + os.path.join(args.log_directory, args.project_name)
     os.system(command)
 
-    args_out_path = os.path.join(args.log_directory, args.project_name)
-    command = 'cp ' + sys.argv[1] + ' ' + args_out_path
-    os.system(command)
+    # args_out_path = os.path.join(args.log_directory, args.project_name)
+    # command = 'cp ' + sys.argv[1] + ' ' + args_out_path
+    # os.system(command)
 
     save_files = False
     if save_files:

@@ -1,3 +1,6 @@
+import json
+import cv2
+import scipy
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -9,6 +12,63 @@ import numpy as np
 import math
 import torch
 
+def loadMeta2Dbb(mat_path, save_path=None):
+    """Load SUNRGBD dataset 2D bbox annotation.
+
+    Args:
+        mat_path (str): Path to the mat file.
+        save_path (str): Path to save the annotation file.
+    Returns:
+        bbox2D (dict): 2D bbox annotation.
+    """
+    dataset_dir_path = os.path.split(mat_path)[0]
+    if save_path is None: # default save path
+        save_path = os.path.join(dataset_dir_path, "labels_bbox2D.json")
+    
+    if os.path.exists(save_path) is True:
+        print("Json file already exists.")
+        return
+    
+    mat = scipy.io.loadmat(mat_path) # ['__header__', '__version__', '__globals__', 'SUNRGBDMeta2DBB']
+    
+    meta2Dbb = mat["SUNRGBDMeta2DBB"][0]
+
+    bbox2D = {}
+    idx = 0
+    print("Load SUNRGBD dataset 2D bbox annotation, please wait a minutes ...")
+    
+    for i in range(len(meta2Dbb)):
+        if meta2Dbb[i][1].shape[1] <= 0:  # ensure contain 2D bbox
+            continue
+        img_subpath = "/".join(meta2Dbb[i][3][0].split("/")[5:])
+        img_path = os.path.join(dataset_dir_path, img_subpath)
+        img = cv2.imread(img_path)
+        ih, iw, ic = img.shape
+
+        depth_subpath = "/".join(meta2Dbb[i][2][0].split("/")[5:])
+        depth_path = os.path.join(dataset_dir_path, depth_subpath)
+        bbox2D[idx] = {"image": img_path, "depth": depth_path, "annotation": {}}
+        
+        ibox = 0
+        for ele in meta2Dbb[i][1][0]:
+            name = ele[2][0]
+            x, y, w, h = ele[1][0].tolist()
+            bbox = [
+                max(int(x), 0),
+                max(int(y), 0),
+                min(int(x + w), iw),
+                min(int(y + h), ih),
+            ]
+            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                continue
+            bbox2D[idx]["annotation"][ibox] = {"bbox": bbox, "class_name": name.lower()}
+            ibox = ibox + 1
+        idx = idx + 1
+
+    with open(save_path, "w") as fileObject:
+        json.dump(bbox2D, fileObject)
+
+    print("Load SUNRGBD dataset 2D bbox annotation done.")
 
 def convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
@@ -32,9 +92,10 @@ def get_num_lines(file_path):
     return len(lines)
 
 
-def colorize(value, vmin=None, vmax=None, cmap='Greys'):
-    value = value.cpu().numpy()[:, :, :]
-    value = np.log10(value)
+def colorize(value, vmin=None, vmax=None, cmap='magma_r'):
+    # value = value.cpu().numpy()[:, :, :]
+    value = value.cpu().numpy().squeeze()
+    # value = np.log10(value)
 
     vmin = value.min() if vmin is None else vmin
     vmax = value.max() if vmax is None else vmax
@@ -48,8 +109,8 @@ def colorize(value, vmin=None, vmax=None, cmap='Greys'):
     value = cmapper(value, bytes=True)
 
     img = value[:, :, :3]
-
-    return img.transpose((2, 0, 1))
+    # img = img.transpose((2, 0, 1))
+    return img
 
 
 def normalize_result(value, vmin=None, vmax=None):

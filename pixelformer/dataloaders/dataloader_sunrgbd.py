@@ -1,3 +1,4 @@
+import json
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.utils.data.distributed
@@ -7,8 +8,9 @@ import numpy as np
 from PIL import Image
 import os
 import random
+import cv2
 
-from utils import DistributedSamplerNoEvenlyDivisible
+from utils import DistributedSamplerNoEvenlyDivisible, loadMeta2Dbb
 
 
 def _is_pil_image(img):
@@ -65,8 +67,15 @@ class DataLoadPreprocess(Dataset):
     def __init__(self, args, mode, transform=None, is_for_online_eval=False):
         self.args = args
         if mode == 'online_eval':
-            with open(args.filenames_file_eval, 'r') as f:
-                self.filenames = f.readlines()
+            if args.dataset == 'sunrgbd':
+                if not os.path.exists(args.filenames_file_eval):
+                    loadMeta2Dbb("D:\Datasets\SUNRGBD\SUNRGBDMeta2DBB_v2.mat", args.filenames_file_eval)
+                else:
+                    with open(args.filenames_file_eval, 'r') as f:
+                        self.filenames = json.loads(f.read())
+            if args.dataset == 'kitti' or args.dataset == 'nyu':
+                with open(args.filenames_file_eval, 'r') as f:
+                    self.filenames = f.readlines()
         else:
             with open(args.filenames_file, 'r') as f:
                 self.filenames = f.readlines()
@@ -77,16 +86,20 @@ class DataLoadPreprocess(Dataset):
         self.is_for_online_eval = is_for_online_eval
     
     def __getitem__(self, idx):
-        sample_path = self.filenames[idx]
+        sample_path = self.filenames[str(idx)]
         # focal = float(sample_path.split()[2])
         focal = 518.8579
 
         if self.mode == 'train':
-            rgb_file = sample_path.split()[0]
-            depth_file = rgb_file.replace('/image_02/data/', '/proj_depth/groundtruth/image_02/')
-            if self.args.use_right is True and random.random() > 0.5:
-                rgb_file.replace('image_02', 'image_03')
-                depth_file.replace('image_02', 'image_03')
+            if self.args.dataset == 'kitti':
+                rgb_file = sample_path.split()[0]
+                depth_file = os.path.join(sample_path.split()[0].split('/')[0], sample_path.split()[1])
+                if self.args.use_right is True and random.random() > 0.5:
+                    rgb_file.replace('image_02', 'image_03')
+                    depth_file.replace('image_02', 'image_03')
+            else:
+                rgb_file = sample_path.split()[0]
+                depth_file = sample_path.split()[1]
 
             image_path = os.path.join(self.args.data_path, rgb_file)
             depth_path = os.path.join(self.args.gt_path, depth_file)
@@ -94,6 +107,8 @@ class DataLoadPreprocess(Dataset):
             image = Image.open(image_path)
             depth_gt = Image.open(depth_path)
             
+            
+
             if self.args.do_kb_crop is True:
                 height = image.height
                 width = image.width
@@ -101,6 +116,18 @@ class DataLoadPreprocess(Dataset):
                 left_margin = int((width - 1216) / 2)
                 depth_gt = depth_gt.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
                 image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+            
+            # To avoid blank boundaries due to pixel registration
+            if self.args.dataset == 'nyu':
+                if self.args.input_height == 480:
+                    depth_gt = np.array(depth_gt)
+                    valid_mask = np.zeros_like(depth_gt)
+                    valid_mask[45:472, 43:608] = 1
+                    depth_gt[valid_mask==0] = 0
+                    depth_gt = Image.fromarray(depth_gt)
+                else:
+                    depth_gt = depth_gt.crop((43, 45, 608, 472))
+                    image = image.crop((43, 45, 608, 472))
     
             if self.args.do_random_rotate is True:
                 random_angle = (random.random() - 0.5) * 2 * self.args.degree
@@ -111,40 +138,58 @@ class DataLoadPreprocess(Dataset):
             depth_gt = np.asarray(depth_gt, dtype=np.float32)
             depth_gt = np.expand_dims(depth_gt, axis=2)
 
-            depth_gt = depth_gt / 256.0
+            if self.args.dataset == 'nyu':
+                depth_gt = depth_gt / 1000.0
+                img, depth = image, depth_gt
+                #<https://arxiv.org/abs/2107.07684>
+                H, W = img.shape[0], img.shape[1]
+                a, b, c, d = random.uniform(0,1), random.uniform(0,1), random.uniform(0,1), random.uniform(0,1)
+                l, u = int(a*W), int(b*H)
+                w, h = int(max((W-a*W)*c*0.75, 1)), int(max((H-b*H)*d*0.75, 1))
+                depth_copied = np.repeat(depth, 3, axis=2)
+                M = np.ones(img.shape)
+                M[l:l+h, u:u+w, :] = 0
+                img = M*img + (1-M)*depth_copied
+                image = img.astype(np.float32)
+            else:
+                depth_gt = depth_gt / 256.0
 
             if image.shape[0] != self.args.input_height or image.shape[1] != self.args.input_width:
                 image, depth_gt = self.random_crop(image, depth_gt, self.args.input_height, self.args.input_width)
             image, depth_gt = self.train_preprocess(image, depth_gt)
             sample = {'image': image, 'depth': depth_gt, 'focal': focal}
         
-        else:
-            if self.mode == 'online_eval':
-                data_path = self.args.data_path_eval
-            else:
-                data_path = self.args.data_path
+        elif self.mode == 'online_eval':
+            # if self.mode == 'online_eval':
+            #     data_path = self.args.data_path_eval
+            # else:
+            #     data_path = self.args.data_path
 
-            image_path = os.path.join(data_path, "./" + sample_path.split()[0])
+            # image_path = os.path.join(data_path, "./" + sample_path.split()[0])
+            image_path = sample_path["image"]
+            depth_path = sample_path["depth"]
             image = np.asarray(Image.open(image_path), dtype=np.float32) / 255.0
 
-            if self.mode == 'online_eval':
-                gt_path = self.args.gt_path_eval
-                depth_path = image_path.replace('/image/', '/groundtruth_depth/').replace('sync_image', 'sync_groundtruth_depth')
-                has_valid_depth = False
-                try:
-                    depth_gt = Image.open(depth_path)
-                    has_valid_depth = True
-                except IOError:
-                    depth_gt = False
-                    # print('Missing gt for {}'.format(image_path))
+            # if self.mode == 'online_eval':
+            #     gt_path = self.args.gt_path_eval
+            #     depth_path = os.path.join(gt_path, "./" + sample_path.split()[1])
+            #     if self.args.dataset == 'kitti':
+            #         depth_path = os.path.join(gt_path, sample_path.split()[0].split('/')[0], sample_path.split()[1])
+            has_valid_depth = False
+            try:
+                depth_gt = Image.open(depth_path)
+                has_valid_depth = True
+            except IOError:
+                depth_gt = False
+                # print('Missing gt for {}'.format(image_path))
 
-                if has_valid_depth:
-                    depth_gt = np.asarray(depth_gt, dtype=np.float32)
-                    depth_gt = np.expand_dims(depth_gt, axis=2)
-                    if self.args.dataset == 'nyu':
-                        depth_gt = depth_gt / 1000.0
-                    else:
-                        depth_gt = depth_gt / 256.0
+            if has_valid_depth:
+                depth_gt = np.asarray(depth_gt, dtype=np.float32)
+                depth_gt = np.expand_dims(depth_gt, axis=2)
+                if self.args.dataset == 'nyu':
+                    depth_gt = depth_gt / 1000.0
+                else:
+                    depth_gt = depth_gt / 256.0
 
             if self.args.do_kb_crop is True:
                 height = image.shape[0]
@@ -154,9 +199,17 @@ class DataLoadPreprocess(Dataset):
                 image = image[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
                 if self.mode == 'online_eval' and has_valid_depth:
                     depth_gt = depth_gt[top_margin:top_margin + 352, left_margin:left_margin + 1216, :]
-            
+            if self.args.dataset == 'sunrgbd':
+                height = image.shape[0]
+                width = image.shape[1]
+                top_margin = int(height - 512)
+                left_margin = int((width - 704) / 2)
+                image = image[top_margin:top_margin + 512, left_margin:left_margin + 704, :]
+                if self.mode == 'online_eval' and has_valid_depth:
+                    depth_gt = depth_gt[top_margin:top_margin + 512, left_margin:left_margin + 704, :]
+                
             if self.mode == 'online_eval':
-                sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth}
+                sample = {'image': image, 'depth': depth_gt, 'focal': focal, 'has_valid_depth': has_valid_depth, 'path': image_path}
             else:
                 sample = {'image': image, 'focal': focal}
         
@@ -238,7 +291,7 @@ class ToTensor(object):
             return {'image': image, 'depth': depth, 'focal': focal}
         else:
             has_valid_depth = sample['has_valid_depth']
-            return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth}
+            return {'image': image, 'depth': depth, 'focal': focal, 'has_valid_depth': has_valid_depth, 'path': sample['path']}
     
     def to_tensor(self, pic):
         if not (_is_pil_image(pic) or _is_numpy_image(pic)):

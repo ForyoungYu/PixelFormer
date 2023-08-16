@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from utils import post_process_depth, flip_lr, compute_errors
 from networks.PixelFormer import PixelFormer
+# from networks.demo_net import DemoNet
 
 
 def convert_arg_line_to_args(arg_line):
@@ -55,9 +56,12 @@ else:
 
 if args.dataset == 'kitti' or args.dataset == 'nyu':
     from dataloaders.dataloader import NewDataLoader
+elif args.dataset == 'sunrgbd':
+    from dataloaders.dataloader_sunrgbd import NewDataLoader
 elif args.dataset == 'kittipred':
     from dataloaders.dataloader_kittipred import NewDataLoader
-
+else:
+    raise NotImplementedError('Dataset {} not implemented.'.format(args.dataset))
 
 def eval(model, dataloader_eval, post_process=False):
     eval_measures = torch.zeros(10).cuda()
@@ -105,7 +109,7 @@ def eval(model, dataloader_eval, post_process=False):
             elif args.eigen_crop:
                 if args.dataset == 'kitti':
                     eval_mask[int(0.3324324 * gt_height):int(0.91351351 * gt_height), int(0.0359477 * gt_width):int(0.96405229 * gt_width)] = 1
-                elif args.dataset == 'nyu':
+                elif args.dataset == 'nyu' or args.dataset == 'sunrgbd':
                     eval_mask[45:471, 41:601] = 1
 
             valid_mask = np.logical_and(valid_mask, eval_mask)
@@ -131,6 +135,7 @@ def eval(model, dataloader_eval, post_process=False):
 def main_worker(args):
 
     model = PixelFormer(version=args.encoder, inv_depth=False, max_depth=args.max_depth, pretrained=None)
+    # model = DemoNet()
     model.train()
 
     num_params = sum([np.prod(p.size()) for p in model.parameters()])

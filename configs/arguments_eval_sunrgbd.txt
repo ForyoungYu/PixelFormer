@@ -1,0 +1,16 @@
+
+--model_name pixelformer_sunrgbd
+--encoder large07
+--dataset sunrgbd
+--input_height 512
+--input_width 704
+--max_depth 10
+
+--data_path_eval datasets/nyu_depth_v2/official_splits/test/
+--gt_path_eval datasets/nyu_depth_v2/official_splits/test/
+--filenames_file_eval data_splits\labels_bbox2D.json
+--min_depth_eval 1e-3
+--max_depth_eval 10
+--eigen_crop
+
+--checkpoint_path checkpoints\nyu\model-117000-best_rms_0.32058.ckpt
